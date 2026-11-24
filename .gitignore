@@ -1,0 +1,21 @@
+# --- OEM / extracted artifacts (NEVER commit) ---
+_ccx/
+*.dll
+*.sys
+*.exe
+*.msix
+*.tgz
+GCUServicePlugin_decomp*
+M2Mqtt*
+_oem_constants.txt
+
+# --- local scratch ---
+.cache/
+scripts/_*.ps1
+scripts/_*.cjs
+*.log
+*.pid
+
+# --- OS ---
+Thumbs.db
+desktop.ini
