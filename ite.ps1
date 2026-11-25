@@ -75,41 +75,60 @@ if (-not ('ItePk' -as [type])) { Add-Type -TypeDefinition $src }
 $dev = Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
     Where-Object { $_.InstanceId -like 'HID\VID_048D&PID_600B&MI_01*' } | Select-Object -First 1
 if (-not $dev) { Write-Host "[HATA] ITE 8291 (048D:600B MI_01) bulunamadi." -ForegroundColor Red; exit 1 }
-$path = '\\?\' + ($dev.InstanceId -replace '\\', '#') + '#{4d1e55b2-f16f-11cf-88cb-001111000030}'
+$script:DevPath = '\\?\' + ($dev.InstanceId -replace '\\', '#') + '#{4d1e55b2-f16f-11cf-88cb-001111000030}'
+$script:LastBri = 50
+$script:LastSav = 0
+$script:h = $null
+$script:FLen = 9
+$script:OLen = 65
 
-$h = [ItePk]::CreateFile($path, [uint32]3221225472, [uint32]3, [IntPtr]::Zero, [uint32]3, [uint32]0, [IntPtr]::Zero)
-if ($h.IsInvalid) { Write-Host "[HATA] Cihaz acilamadi (Win32 hata $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))." -ForegroundColor Red; exit 1 }
+function OpenIteDevice {
+    # HID handle'i (yeniden) acar. Cihaz koptugunda (hata 1167) tekrar cagrilir.
+    $script:h = [ItePk]::CreateFile($script:DevPath, [uint32]3221225472, [uint32]3, [IntPtr]::Zero, [uint32]3, [uint32]0, [IntPtr]::Zero)
+    if ($script:h.IsInvalid) { return $false }
+    $pp2 = [IntPtr]::Zero
+    $caps2 = New-Object ItePk+HIDP_CAPS
+    [void][ItePk]::HidD_GetPreparsedData($script:h, [ref]$pp2)
+    [void][ItePk]::HidP_GetCaps($pp2, [ref]$caps2)
+    [void][ItePk]::HidD_FreePreparsedData($pp2)
+    $script:FLen = [int]$caps2.FeatureReportByteLength
+    $script:OLen = [int]$caps2.OutputReportByteLength
+    return $true
+}
 
-$pp = [IntPtr]::Zero
-$caps = New-Object ItePk+HIDP_CAPS
-[void][ItePk]::HidD_GetPreparsedData($h, [ref]$pp)
-[void][ItePk]::HidP_GetCaps($pp, [ref]$caps)
-[void][ItePk]::HidD_FreePreparsedData($pp)
-$FLen = [int]$caps.FeatureReportByteLength
-$OLen = [int]$caps.OutputReportByteLength
+# Ilk acilis
+if (-not (OpenIteDevice)) {
+    Write-Host "[HATA] Cihaz acilamadi (Win32 hata $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))." -ForegroundColor Red
+    exit 1
+}
 
 function Ctrl([byte[]]$payload) {
     # buf[0] = report id 0, then up to 8 command bytes, padded to FeatureReportByteLength
-    $buf = New-Object byte[] $FLen
-    for ($i = 0; $i -lt $payload.Length -and ($i + 1) -lt $FLen; $i++) { $buf[$i + 1] = $payload[$i] }
-    $ok = [ItePk]::HidD_SetFeature($h, $buf, $FLen)
-    if (-not $ok) { Write-Host ("  [!] SetFeature basarisiz: {0} (hata {1})" -f (($payload | % { '{0:X2}' -f $_ }) -join ' '), [Runtime.InteropServices.Marshal]::GetLastWin32Error()) -ForegroundColor DarkYellow }
+    if (-not $script:h -or $script:h.IsInvalid) { return $false }
+    $buf = New-Object byte[] $script:FLen
+    for ($i = 0; $i -lt $payload.Length -and ($i + 1) -lt $script:FLen; $i++) { $buf[$i + 1] = $payload[$i] }
+    $ok = [ItePk]::HidD_SetFeature($script:h, $buf, $script:FLen)
+    if (-not $ok) {
+        $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        Write-Host ("  [!] SetFeature basarisiz (hata {0})" -f $err) -ForegroundColor DarkYellow
+    }
     Start-Sleep -Milliseconds 5
     return $ok
 }
 function GetCtrl {
-    $buf = New-Object byte[] $FLen
-    if ([ItePk]::HidD_GetFeature($h, $buf, $FLen)) { return , $buf[1..($FLen - 1)] }
+    if (-not $script:h -or $script:h.IsInvalid) { return $null }
+    $buf = New-Object byte[] $script:FLen
+    if ([ItePk]::HidD_GetFeature($script:h, $buf, $script:FLen)) { return , $buf[1..($script:FLen - 1)] }
     return $null
 }
 function OutReport([byte[]]$payload64) {
     # Output report: [report id 0] + 64 data bytes
-    $buf = New-Object byte[] $OLen
-    [Array]::Copy($payload64, 0, $buf, 1, [Math]::Min($payload64.Length, $OLen - 1))
+    if (-not $script:h -or $script:h.IsInvalid) { return $false }
+    $buf = New-Object byte[] $script:OLen
+    [Array]::Copy($payload64, 0, $buf, 1, [Math]::Min($payload64.Length, $script:OLen - 1))
     $w = [uint32]0
-    $ok = [ItePk]::WriteFile($h, $buf, [uint32]$OLen, [ref]$w, [IntPtr]::Zero)
-    if (-not $ok) { $ok = [ItePk]::HidD_SetOutputReport($h, $buf, $OLen) }
-    if (-not $ok) { Write-Host "  [!] Veri yazilamadi (hata $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))" -ForegroundColor DarkYellow }
+    $ok = [ItePk]::WriteFile($script:h, $buf, [uint32]$script:OLen, [ref]$w, [IntPtr]::Zero)
+    if (-not $ok) { $ok = [ItePk]::HidD_SetOutputReport($script:h, $buf, $script:OLen) }
     return $ok
 }
 
@@ -145,6 +164,8 @@ function EnterCustomMode([byte]$bri, [byte]$sav) {
     if (-not $HizliGuncelle) {
         SendPrelude
     }
+    $script:LastBri = $bri
+    $script:LastSav = $sav
     [void](Ctrl @(0x08, 0x02, 0x33, 0x00, $bri, 0x00, 0x00, $sav))
 }
 function SendFrame([byte[]]$frame) {
@@ -204,103 +225,6 @@ function SetGradientTheme([array]$stops, [byte]$bri, [byte]$sav) {
     SendFrame $frame
 }
 
-# --- 4 Bolgeli zit yonlu dalga ---
-# LED duzeni: 126 LED = 21 sutun x 6 satir. $i % 6 = satir (0..5), Floor($i/6) = sutun (0..20).
-# Klavye sutun bazinda 4 bolgeye ayrilir; bolgeler sirayla asagi/yukari/asagi/yukari akar.
-$script:BolgeDort = @(
-    @{ ColStart = 0;  ColEnd = 5;  Yon = 1  },   # Bolge 1: asagi
-    @{ ColStart = 6;  ColEnd = 10; Yon = -1 },   # Bolge 2: yukari
-    @{ ColStart = 11; ColEnd = 15; Yon = 1  },   # Bolge 3: asagi
-    @{ ColStart = 16; ColEnd = 20; Yon = -1 }    # Bolge 4: yukari
-)
-
-# Paylasilan rastgele sayi uretici (her calistirmada farkli renk)
-if (-not $script:Rand) {
-    $script:Rand = [System.Random]::new()
-}
-
-function New-BolgeFrame([double]$phase, [byte]$bri, [double[]]$randHue) {
-    # phase 0..1 arasi surekli artar; her bolge kendi yonunde ilerler.
-    # Renkler rastgele: $randHue bolge basina rastgele hue (0..1), animasyon boyunca sabit kalir.
-    $frame = New-Object byte[] 512
-    $rows = 6.0
-    for ($bi = 0; $bi -lt $script:BolgeDort.Count; $bi++) {
-        $b = $script:BolgeDort[$bi]
-        $baseHue = $randHue[$bi]
-        for ($col = $b.ColStart; $col -le $b.ColEnd; $col++) {
-            $span = [Math]::Max(1, ($b.ColEnd - $b.ColStart))
-            $colT = ($col - $b.ColStart) / $span
-            for ($row = 0; $row -lt 6; $row++) {
-                $i = ($col * 6) + $row
-                if ($i -lt 0 -or $i -ge 126) { continue }
-                $off = ($i * 4) + 1
-                # Dalga fazi: yon=1 ise satir artinca faz artar (asagi akis), yon=-1 ise ters.
-                $w = ($row / $rows) * 2.0 * [Math]::PI
-                $val = [Math]::Sin(($w * $b.Yon) - ($phase * 2.0 * [Math]::PI))
-                $t = ($val + 1.0) / 2.0                 # 0..1 parlaklik dalgasi
-                # Rastgele renk: bolge hue'su + sutun boyunca hafif kayma (gokkusagi degil)
-                $hue = ($baseHue + ($colT * 0.12)) % 1.0
-                $c = HsvToRgb $hue 1.0 1.0
-                $scale = $t
-                $frame[$off]     = [byte][Math]::Min(255, [Math]::Round($c[0] * $scale))
-                $frame[$off + 1] = [byte][Math]::Min(255, [Math]::Round($c[1] * $scale))
-                $frame[$off + 2] = [byte][Math]::Min(255, [Math]::Round($c[2] * $scale))
-            }
-        }
-    }
-    return ,$frame
-}
-
-function HsvToRgb([double]$h, [double]$s, [double]$v) {
-    $h = (($h % 1.0) + 1.0) % 1.0
-    $i = [int][Math]::Floor($h * 6.0)
-    $f = ($h * 6.0) - $i
-    $p = $v * (1.0 - $s)
-    $q = $v * (1.0 - ($f * $s))
-    $t = $v * (1.0 - ((1.0 - $f) * $s))
-    $r = 0.0; $g = 0.0; $b = 0.0
-    switch ($i % 6) {
-        0 { $r = $v; $g = $t; $b = $p }
-        1 { $r = $q; $g = $v; $b = $p }
-        2 { $r = $p; $g = $v; $b = $t }
-        3 { $r = $p; $g = $q; $b = $v }
-        4 { $r = $t; $g = $p; $b = $v }
-        5 { $r = $v; $g = $p; $b = $q }
-    }
-    return @([Math]::Round($r * 255), [Math]::Round($g * 255), [Math]::Round($b * 255))
-}
-
-function Start-BolgeDalga([byte]$bri, [byte]$spd, [byte]$sav, [int]$SureMs = 0) {
-    # SureMs=0 ise kullanici durdurana (Ctrl+C / surec kapatilana) kadar calisir.
-    $fps = 30
-    $stepMs = [int](1000 / $fps)
-    # hiz 1..10 -> tur suresi (hizli=1)
-    $cycleMs = [int](600 + (($spd - 1) * 220))
-    $phaseStep = [double]$stepMs / [double]$cycleMs
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $phase = 0.0
-    # Bolge basina rastgele renk (animasyon boyunca sabit).
-    $randHue = @()
-    for ($bi = 0; $bi -lt $script:BolgeDort.Count; $bi++) { $randHue += $script:Rand.NextDouble() }
-    SendPrelude
-    EnterCustomMode $bri $sav
-    try {
-        while ($true) {
-            if ($SureMs -gt 0 -and $sw.ElapsedMilliseconds -ge $SureMs) { break }
-            $frame = New-BolgeFrame $phase $bri $randHue
-            [void](Ctrl @(0x12, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00))
-            $chunk = New-Object byte[] 64
-            for ($k = 0; $k -lt 8; $k++) {
-                [Array]::Copy($frame, $k * 64, $chunk, 0, 64)
-                [void](OutReport $chunk)
-            }
-            $phase = ($phase + $phaseStep) % 1.0
-            Start-Sleep -Milliseconds $stepMs
-        }
-    } finally {
-        # Durdurulunca mevcut kareyi birak (statik kalir)
-    }
-}
 function Set-EcFanMode([string]$Mode, [int]$ManuelYuzde = -1) {
     $ecH = [ItePk]::CreateFile("\\.\ACPIDriver", [uint32]3221225472, [uint32]3, [IntPtr]::Zero, [uint32]3, [uint32]0, [IntPtr]::Zero)
     if ($ecH.IsInvalid) {
@@ -868,17 +792,6 @@ switch ($Komut.ToLower()) {
         [void](SyncOemRegistry 3 $bri $spd 1 0 0 0 $true)
         Write-Host "[OK] Dalga (parlaklik $bri/50, hiz $spd)" -ForegroundColor Green
     }
-    "bolgedalga" {
-        # 4 bolge: asagi / yukari / asagi / yukari, rastgele renkler.
-        # Arg1 verilirse o kadar saniye calisir; verilmezse durdurulana kadar.
-        $sureMs = 0
-        if ($Arg1) { $saniye = [int]$Arg1; if ($saniye -gt 0) { $sureMs = $saniye * 1000 } }
-        $sureTxt = if ($sureMs -gt 0) { "$($sureMs / 1000) sn" } else { "durdurulana kadar" }
-        Write-Host "[OK] 4 Bolgeli Zit Dalga basladi (rastgele renkler, $sureTxt, parlaklik $bri/50, hiz $spd)." -ForegroundColor Green
-        Write-Host "     Durdurmak icin bu pencereyi kapatin veya baska bir efekt secin." -ForegroundColor DarkGray
-        Start-BolgeDalga $bri $spd $sav $sureMs
-        Write-Host "[OK] 4 Bolgeli Dalga durduruldu (son kare ekranda kaldi)." -ForegroundColor Cyan
-    }
     "nefes"    {
         SendPrelude
         DefaultPalette
@@ -950,6 +863,14 @@ switch ($Komut.ToLower()) {
         [void](Ctrl @(0x08, 0x02, 0x0A, $spd, $bri, 0x08, 0x00, $sav))
         [void](SyncOemRegistry 10 $bri $spd 0 0 0 0 $true)
         Write-Host "[OK] Yagmur Damlasi / Raindrop (parlaklik $bri/50, hiz $spd)" -ForegroundColor Green
+    }
+    "rastgele" {
+        # Donanim efekti 0x04 (Random): firmware'de calisir, surekli yazim yok.
+        SendPrelude
+        DefaultPalette
+        [void](Ctrl @(0x08, 0x02, 0x04, $spd, $bri, 0x08, 0x00, $sav))
+        [void](SyncOemRegistry 4 $bri $spd 0 0 0 0 $true)
+        Write-Host "[OK] Rastgele / Random (parlaklik $bri/50, hiz $spd)" -ForegroundColor Green
     }
     "tersdalga" {
         SendPrelude
@@ -1059,6 +980,6 @@ switch ($Komut.ToLower()) {
     "servis-yenile" {
         Restart-OemService
     }
-    default    { Write-Host "Komutlar: tani | kapat | parlaklik | renk <ad> | dalga | nefes | aurora | orijinal | tepkisel | dalgalanma | kayan | yagmur | neon | kivilcim | oyuncu | siber | gunbatimi | okyanus | atesbuz | matrix | servis-yenile" }
+    default    { Write-Host "Komutlar: tani | kapat | parlaklik | renk <ad> | dalga | nefes | aurora | orijinal | tepkisel | rastgele | kayan | yagmur | neon | kivilcim | oyuncu | siber | gunbatimi | okyanus | atesbuz | matrix | servis-yenile" }
 }
 $h.Close()

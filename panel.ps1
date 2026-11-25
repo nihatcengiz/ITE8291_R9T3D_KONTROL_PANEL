@@ -369,7 +369,7 @@ if (-not (Test-Path $IteScript)) {
                     <Button x:Name="BtnEfektZehir" Height="32" Content="Toksik / Biohazard" FontSize="11.5" Background="#365314" BorderBrush="#A3E635"/>
                     <Button x:Name="BtnEfektSakura" Height="32" Content="Sakura &#x00C7;i&#x00E7;e&#x011F;i" FontSize="11.5" Background="#9D174D" BorderBrush="#F9A8D4"/>
                     <Button x:Name="BtnEfektYagmur" Height="32" Content="Ya&#x011F;mur Damlas&#x0131;" FontSize="11.5" Background="#1E293B" BorderBrush="#64748B"/>
-                    <Button x:Name="BtnEfektBolgeDalga" Height="32" Content="4 B&#x00F6;lge Z&#x0131;t Dalga" FontSize="11.5" Background="#1E3A8A" BorderBrush="#22D3EE" ToolTip="Klavyeyi 4 b&#x00F6;lgeye b&#x00F6;ler, rastgele renklerle a&#x015F;a&#x011F;&#x0131;/yukar&#x0131; akan animasyon. Tekrar bas: durdur."/>
+                    <Button x:Name="BtnEfektRastgele" Height="32" Content="Rastgele" FontSize="11.5" Background="#3F3F46" BorderBrush="#A1A1AA" ToolTip="Donan&#x0131;m efekti 0x04 (Random): firmware'de &#x00E7;al&#x0131;&#x015F;&#x0131;r, s&#x00FC;rekli yaz&#x0131;m yok."/>
                 </UniformGrid>
             </StackPanel>
         </Border>
@@ -794,23 +794,6 @@ function Stop-BolgeAnimasyon {
             Remove-Item $script:BolgePidFile -Force -ErrorAction SilentlyContinue
         }
     } catch {}
-    $b = Get-Control 'BtnEfektBolgeDalga'
-    if ($b) { $b.Content = (U "4 B\u00F6lge Z\u0131t Dalga") }
-}
-
-function Start-BolgeAnimasyon {
-    # Animasyonu ayri bir surecte baslatir; panel kapansa da donmeye devam eder.
-    $argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File', ('"' + $IteScript + '"'))
-    $argList += @('-Komut','bolgedalga','-Parlaklik',([string][int]$SldParlaklik.Value),'-Hiz',([string][int]$SldHiz.Value))
-    if ($ChkKaydet.IsChecked) { $argList += '-Kaydet' } else { $argList += '-Gecici' }
-    try {
-        $p = Start-Process powershell.exe -ArgumentList $argList -WindowStyle Hidden -PassThru
-        $script:BolgeDalgaProc = $p
-        try { Set-Content -Path $script:BolgePidFile -Value ([string]$p.Id) -Encoding ASCII } catch {}
-        $TxtLog.Text = (U "[OK] 4 B\u00F6lge Z\u0131t Dalga ba\u015Flad\u0131 (rastgele renkler). Ba\u015Fka efekt se\u00E7ene kadar d\u00F6ner.")
-    } catch {
-        $TxtLog.Text = ("[HATA] Animasyon baslatilamadi: " + $_.Exception.Message)
-    }
 }
 
 function Invoke-IteCommand([string]$Komut, [string]$Arg1 = "") {
@@ -851,7 +834,8 @@ function Set-RgbAvailable([bool]$available) {
         'SldR','SldG','SldB','BtnRenkSecici','BtnOzelRenkUygula',
         'BtnEfektOrijinal','BtnEfektAurora','BtnEfektDalga','BtnEfektTersDalga','BtnEfektDikeyDalga',
         'BtnEfektYukariDalga','BtnEfektNefes','BtnEfektNeon','BtnEfektNeonDalga','BtnEfektLav',
-        'BtnEfektKuzey','BtnEfektAltin','BtnEfektZehir','BtnEfektSakura','BtnEfektYagmur','BtnEfektBolgeDalga',
+        'BtnEfektKuzey','BtnEfektAltin','BtnEfektZehir','BtnEfektSakura','BtnEfektYagmur',
+        'BtnEfektRastgele',
         'BtnTemaOyuncu','BtnTemaMoba','BtnTemaKeskin','BtnTemaTurkBayragi','BtnTemaSiber',
         'BtnTemaRetro','BtnTemaGalaksi','BtnTemaMatrix','BtnTemaGunbatimi','BtnTemaOkyanus',
         'BtnTemaAtesBuz','BtnTemaGokkusagiSabit','BtnKapat','BtnTani','ChkKaydet','ChkStatikMod','ChkServisYenile'
@@ -1102,7 +1086,7 @@ $EfektButonlari = @{
     BtnEfektZehir          = "zehir"
     BtnEfektSakura         = "sakura"
     BtnEfektYagmur         = "yagmur"
-    BtnEfektBolgeDalga     = "bolgedalga"
+    BtnEfektRastgele       = "rastgele"
     BtnTemaOyuncu          = "oyuncu"
     BtnTemaMoba            = "moba"
     BtnTemaKeskin          = "keskin"
@@ -1124,15 +1108,10 @@ foreach ($kv in $EfektButonlari.GetEnumerator()) {
         $script:SonEfektKomutu = $efKomut
         $script:SonEfektArg = ""
         if ([int]$SldParlaklik.Value -eq 0) { $SldParlaklik.Value = 36 }
-        # Once onceki efektin animasyonunu durdur (varsa).
+        # Once onceki animasyon surecini durdur (varsa).
         Stop-BolgeAnimasyon
-        if ($efKomut -eq 'bolgedalga') {
-            # Diger efektler gibi tek tikla baslar ve kullanici degistirene kadar doner.
-            Start-BolgeAnimasyon
-        } else {
-            [void](Invoke-IteCommand $efKomut)
-            Update-DeviceStatus
-        }
+        [void](Invoke-IteCommand $efKomut)
+        Update-DeviceStatus
     }.GetNewClosure())
 }
 
@@ -1141,17 +1120,13 @@ Update-EcSensors
 Update-DeviceStatus
 Update-FanBoostButton
 
-# Onceki oturumdan calisan bir bolge animasyonu varsa butonu isaretleyip hatirlat.
+# Onceki oturumdan kalan animasyon sureci varsa temizle.
 try {
     if (Test-Path $script:BolgePidFile) {
         $oldPid = [int](Get-Content -Raw $script:BolgePidFile).Trim()
         $p = Get-Process -Id $oldPid -ErrorAction SilentlyContinue
-        if ($p -and $p.ProcessName -eq 'powershell') {
-            $bb = Get-Control 'BtnEfektBolgeDalga'
-            if ($bb) { $bb.Content = (U "4 B\u00F6lge Dalga (\u00E7al\u0131\u015F\u0131yor)") }
-        } else {
-            Remove-Item $script:BolgePidFile -Force -ErrorAction SilentlyContinue
-        }
+        if ($p -and $p.ProcessName -eq 'powershell') { Stop-Process -Id $oldPid -Force -ErrorAction SilentlyContinue }
+        Remove-Item $script:BolgePidFile -Force -ErrorAction SilentlyContinue
     }
 } catch {}
 
